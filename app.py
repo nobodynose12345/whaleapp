@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """WhaleApp – minimal HTTP server (stdlib only)."""
 
+import collections
 import http.cookies
 import uuid
 import urllib.parse
@@ -10,10 +11,11 @@ HOST = "0.0.0.0"
 PORT = 8080
 
 # ---------------------------------------------------------------------------
-# In-memory game store
+# In-memory game store (capped LRU to prevent unbounded memory growth)
 # ---------------------------------------------------------------------------
 
-GAMES: dict[str, dict] = {}
+MAX_GAMES = 10_000
+GAMES: collections.OrderedDict[str, dict] = collections.OrderedDict()
 
 
 def _new_game() -> dict:
@@ -21,9 +23,21 @@ def _new_game() -> dict:
 
 
 def _get_or_create_game(game_id: str) -> dict:
-    if game_id not in GAMES:
-        GAMES[game_id] = _new_game()
+    if game_id in GAMES:
+        GAMES.move_to_end(game_id)  # mark as recently used
+        return GAMES[game_id]
+    if len(GAMES) >= MAX_GAMES:
+        GAMES.popitem(last=False)  # evict least-recently-used entry
+    GAMES[game_id] = _new_game()
     return GAMES[game_id]
+
+
+def _reset_game(game_id: str) -> None:
+    if game_id in GAMES:
+        GAMES.move_to_end(game_id)
+    elif len(GAMES) >= MAX_GAMES:
+        GAMES.popitem(last=False)
+    GAMES[game_id] = _new_game()
 
 
 # ---------------------------------------------------------------------------
@@ -37,14 +51,14 @@ _WIN_LINES = [
 ]
 
 
-def check_winner(board: list[str]) -> str | None:
+def check_winner(board: list) -> str | None:
     for a, b, c in _WIN_LINES:
         if board[a] != " " and board[a] == board[b] == board[c]:
             return board[a]
     return None
 
 
-def is_draw(board: list[str]) -> bool:
+def is_draw(board: list) -> bool:
     return " " not in board
 
 
@@ -71,14 +85,37 @@ def make_move(game: dict, idx: int) -> None:
 # Cookie helpers
 # ---------------------------------------------------------------------------
 
+def _parse_game_id(raw_cookie: str) -> str | None:
+    """Return a validated UUID4 game_id from the Cookie header, or None."""
+    if not raw_cookie:
+        return None
+    try:
+        c = http.cookies.SimpleCookie(raw_cookie)
+    except http.cookies.CookieError:
+        return None
+    if "game_id" not in c:
+        return None
+    value = c["game_id"].value
+    try:
+        parsed = uuid.UUID(value, version=4)
+    except ValueError:
+        return None
+    # Ensure canonical form (rejects non-canonical hex strings)
+    if str(parsed) != value:
+        return None
+    return value
+
+
 def _read_game_id(handler: "WhaleHandler") -> tuple[str, bool]:
     """Return (game_id, is_new).  is_new=True when a fresh cookie was minted."""
     raw = handler.headers.get("Cookie", "")
-    if raw:
-        c = http.cookies.SimpleCookie(raw)
-        if "game_id" in c:
-            return c["game_id"].value, False
+    game_id = _parse_game_id(raw)
+    if game_id:
+        return game_id, False
     return str(uuid.uuid4()), True
+
+
+_COOKIE_ATTRS = "Path=/; HttpOnly; SameSite=Lax"
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +243,7 @@ def render_tictactoe(game: dict) -> str:
 class WhaleHandler(BaseHTTPRequestHandler):
 
     def _send_html(self, html: str, status: int = 200,
-                   extra_headers: list[tuple[str, str]] | None = None) -> None:
+                   extra_headers: list | None = None) -> None:
         body = html.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -217,16 +254,25 @@ class WhaleHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _redirect(self, location: str,
-                  extra_headers: list[tuple[str, str]] | None = None) -> None:
+                  extra_headers: list | None = None) -> None:
         self.send_response(303)
         self.send_header("Location", location)
         for name, value in (extra_headers or []):
             self.send_header(name, value)
         self.end_headers()
 
-    def _read_body(self) -> str:
-        length = int(self.headers.get("Content-Length", 0))
-        return self.rfile.read(length).decode("utf-8") if length else ""
+    def _read_body(self) -> str | None:
+        """Read and return the request body.  Returns None and sends 400 on a
+        malformed Content-Length header; returns '' when length is 0 or absent."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self.send_response(400)
+            self.end_headers()
+            return None  # sentinel: 400 already sent
+        if length <= 0:
+            return ""
+        return self.rfile.read(length).decode("utf-8", errors="replace")
 
     # ---- GET ---------------------------------------------------------------
 
@@ -242,9 +288,10 @@ class WhaleHandler(BaseHTTPRequestHandler):
         elif self.path == "/tictactoe":
             game_id, is_new = _read_game_id(self)
             game = _get_or_create_game(game_id)
-            extra: list[tuple[str, str]] = []
+            extra: list = []
             if is_new:
-                extra.append(("Set-Cookie", f"game_id={game_id}; Path=/; HttpOnly"))
+                extra.append(("Set-Cookie",
+                               f"game_id={game_id}; {_COOKIE_ATTRS}"))
             self._send_html(render_tictactoe(game), extra_headers=extra)
 
         else:
@@ -255,12 +302,15 @@ class WhaleHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         game_id, is_new = _read_game_id(self)
-        extra: list[tuple[str, str]] = []
+        extra: list = []
         if is_new:
-            extra.append(("Set-Cookie", f"game_id={game_id}; Path=/; HttpOnly"))
+            extra.append(("Set-Cookie",
+                           f"game_id={game_id}; {_COOKIE_ATTRS}"))
 
         if self.path == "/tictactoe/move":
             body = self._read_body()
+            if body is None:
+                return  # 400 already sent by _read_body
             params = urllib.parse.parse_qs(body)
             try:
                 idx = int(params["cell"][0])
@@ -271,8 +321,8 @@ class WhaleHandler(BaseHTTPRequestHandler):
             self._redirect("/tictactoe", extra_headers=extra)
 
         elif self.path == "/tictactoe/new":
-            self._read_body()  # drain any body
-            GAMES[game_id] = _new_game()
+            self._read_body()  # drain any body; ignore errors — we redirect regardless
+            _reset_game(game_id)
             self._redirect("/tictactoe", extra_headers=extra)
 
         else:
