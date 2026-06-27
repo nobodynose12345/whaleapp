@@ -20,11 +20,18 @@ docker run --rm -p 8080:8080 whaleapp
 curl http://localhost:8080/
 ```
 
+## Routes
+
+| Path | Description |
+|------|-------------|
+| `/` | Hello world |
+| `/tictactoe` | Playable 3×3 tic-tac-toe (two-player, server-side state) |
+
 ## Project layout
 
 ```
 whaleapp/
-├── app.py       # HTTP server (< 40 lines, stdlib only)
+├── app.py       # HTTP server (stdlib only)
 ├── Dockerfile   # Minimal Python 3 image
 └── README.md    # This file
 ```
