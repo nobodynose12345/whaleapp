@@ -31,7 +31,29 @@ curl http://localhost:8080/
 
 ```
 whaleapp/
-├── app.py       # HTTP server (stdlib only)
-├── Dockerfile   # Minimal Python 3 image
-└── README.md    # This file
+├── app.py                    # HTTP server (stdlib only)
+├── test_tictactoe.py         # Unit + integration tests
+├── requirements-dev.txt      # Dev dependencies (coverage)
+├── .coveragerc               # Coverage configuration
+├── .github/workflows/ci.yml  # CI: run tests + coverage on push/PR
+├── Dockerfile                # Minimal Python 3 image
+└── README.md                 # This file
 ```
+
+## Tests & coverage
+
+```bash
+# Install dev dependencies (coverage)
+pip install -r requirements-dev.txt
+
+# Run tests only
+python3 test_tictactoe.py
+
+# Run tests with coverage report
+coverage run test_tictactoe.py
+coverage report -m         # text summary with missing lines
+coverage html              # HTML report in htmlcov/
+```
+
+CI runs on every push and PR via GitHub Actions; the build fails if
+coverage drops below the `fail_under` threshold set in `.coveragerc`.
