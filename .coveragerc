@@ -1,0 +1,14 @@
+[run]
+source = app
+
+[report]
+show_missing = True
+fail_under = 95
+exclude_lines =
+    # Don't flag the top-level server entry-point
+    if __name__ == .__main__.:
+    server\.serve_forever\(\)
+    server\.server_close\(\)
+    print\(.*Listening
+    print\(.*Shutting
+    except KeyboardInterrupt:
